@@ -216,6 +216,10 @@ class Bot():
                             self.sscoreList += str(sb.score) + "\n"
                             self.sscoreList += "---\n"
                         
+                        # Pass scoreboard to GameAI for strategic decision making
+                        if self.gameStatus == "Game":
+                            self.gameAi.UpdateGameState(self.scoreList, self.time, self.gameStatus)
+                        
                         self.scoreList.clear()
                     
                     

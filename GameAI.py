@@ -31,6 +31,23 @@ import heapq
 # </summary>
 class GameAI():
 
+    # Energy thresholds
+    CRITICAL_ENERGY = 20  # Emergency - must find powerup
+    LOW_ENERGY = 30        # Tactical - avoid combat, seek powerup
+    
+    # Scoring and strategic state
+    my_name = "LEIAM WORM (WILDBOW) PLS"  # Bot name from Bot.py
+    my_score = 0
+    my_rank = 0
+    enemy_scores = {}  # {name: score}
+    total_players = 0
+    game_time = 0  # seconds
+    game_status = "Ready"  # Ready, Game, GameOver
+    
+    # Enemy tracking for prediction
+    enemy_last_positions = {}  # {enemy_id: (x, y, timestamp)}
+    enemy_velocity = {}        # {enemy_id: (dx, dy)}
+    
     player = Position()
     state = "ready"
     dir = "north"
@@ -64,7 +81,7 @@ class GameAI():
         self.current_observations = []
         self.under_attack = False
         self.shot_connected = False
-        self.last_known_enemy_pos = None
+        self.enemy_nearby = False  # True when "steps" detected
         self.last_known_enemy_pos = None
         self.combat_state = None # None, "strafe_turning", "strafe_moving", "reacquiring"
         self.strafe_dir = None   # "left" or "right" relative to enemy
@@ -90,6 +107,61 @@ class GameAI():
         self.visited.add((x, y))
         self.safe_cells.add((x, y))
         self.map_state[(x, y)] = "Safe"
+
+    # <summary>
+    # Update game state from scoreboard
+    # </summary>
+    def UpdateGameState(self, scoreboard_data, game_time, game_status):
+        """
+        Atualiza estado do jogo baseado em scoreboard
+        scoreboard_data: list of ScoreBoard objects
+        """
+        self.game_time = game_time
+        self.game_status = game_status
+        
+        self.enemy_scores = {}
+        for entry in scoreboard_data:
+            if entry.name == self.my_name:
+                self.my_score = entry.score
+            else:
+                self.enemy_scores[entry.name] = entry.score
+        
+        # Calculate rank
+        all_scores = [self.my_score] + list(self.enemy_scores.values())
+        all_scores_sorted = sorted(all_scores, reverse=True)
+        self.my_rank = all_scores_sorted.index(self.my_score) + 1 if self.my_score in all_scores_sorted else 0
+        self.total_players = len(all_scores)
+        
+        print(f"SCOREBOARD: Rank {self.my_rank}/{self.total_players}, Score: {self.my_score}, Time: {game_time}s")
+    
+    # <summary>
+    # Get strategic mode based on ranking and time
+    # </summary>
+    def GetStrategicMode(self):
+        """
+        Determina modo estratégico baseado em ranking e tempo
+        Returns: "DEFENSIVE", "BALANCED", "AGGRESSIVE"
+        """
+        if self.game_status != "Game":
+            return "BALANCED"
+        
+        if not self.enemy_scores:
+            return "BALANCED"  # Sem info, joga normal
+        
+        time_remaining = 600 - self.game_time  # 10min = 600s
+        rank_percentile = self.my_rank / self.total_players if self.total_players > 0 else 0.5
+        
+        # DEFENSIVE: Proteger lead quando ganhando perto do fim
+        if self.my_rank == 1 and time_remaining < 120:  # 1st place, < 2min
+            return "DEFENSIVE"
+        
+        # AGGRESSIVE: Precisa arriscar quando perdendo
+        elif rank_percentile > 0.7:  # Bottom 30%
+            return "AGGRESSIVE"
+        
+        # BALANCED: Meio da tabela ou início de jogo
+        else:
+            return "BALANCED"
 
 
     # <summary>
@@ -189,6 +261,9 @@ class GameAI():
                 self.gold_locations.add((curr_x, curr_y))
             elif s == "redLight":
                 self.powerup_locations.add((curr_x, curr_y))
+            elif s == "steps":
+                self.enemy_nearby = True
+                print("ALERT: Enemy nearby (steps detected)! Hunting mode activated.")
         
         # If we successfully picked up gold, remove it from memory
         if "blueLight" not in o and (curr_x, curr_y) in self.gold_locations:
@@ -222,6 +297,79 @@ class GameAI():
     # </summary>
     def GetObservationsClean(self):
         self.current_observations = []
+        self.enemy_nearby = False  # Reset flag
+    
+    # <summary>
+    # Track enemy position for prediction
+    # </summary>
+    def UpdateEnemyTracking(self, enemy_obs):
+        """
+        Atualiza tracking de inimigos baseado em observação
+        enemy_obs: string like "enemy#3" (distance)
+        """
+        try:
+            parts = enemy_obs.split('#')
+            if len(parts) > 1:
+                distance = int(parts[1])
+                
+                # Inferir posição aproximada (inimigo está na nossa direção)
+                enemy_x, enemy_y = self.player.x, self.player.y
+                
+                if self.dir == "north":
+                    enemy_y -= distance
+                elif self.dir == "east":
+                    enemy_x += distance
+                elif self.dir == "south":
+                    enemy_y += distance
+                elif self.dir == "west":
+                    enemy_x -= distance
+                
+                # Salvar última posição conhecida
+                enemy_id = f"enemy_{self.dir}_{distance}"  # ID aproximado
+                current_time = self.game_time
+                
+                if enemy_id in self.enemy_last_positions:
+                    old_x, old_y, old_time = self.enemy_last_positions[enemy_id]
+                    dt = current_time - old_time
+                    if dt > 0:
+                        dx = (enemy_x - old_x) / dt
+                        dy = (enemy_y - old_y) / dt
+                        self.enemy_velocity[enemy_id] = (dx, dy)
+                
+                self.enemy_last_positions[enemy_id] = (enemy_x, enemy_y, current_time)
+                
+        except Exception as e:
+            print(f"Error tracking enemy: {e}")
+    
+    # <summary>
+    # Predict if should shoot based on enemy movement
+    # </summary>
+    def PredictEnemyInterception(self, enemy_dist):
+        """
+        Prevê se deve atirar agora ou esperar baseado em movimento inimigo
+        Returns: True se deve atirar, False se deve esperar
+        """
+        # Se temos tracking de velocidade para inimigo atual
+        enemy_id = f"enemy_{self.dir}_{enemy_dist}"
+        
+        if enemy_id not in self.enemy_velocity:
+            return True  # Sem dados, atira normal
+        
+        dx, dy = self.enemy_velocity[enemy_id]
+        
+        # Se inimigo está se movendo perpendicular (lateral), dificulta acerto
+        # Se está se aproximando/afastando na nossa direção, é mais fácil
+        
+        if self.dir in ["north", "south"]:
+            lateral_speed = abs(dx)
+        else:  # east, west
+            lateral_speed = abs(dy)
+        
+        # Se movimento lateral é significativo, considerar não atirar
+        if lateral_speed > 0.5:  # Movendo rápido lateral
+            return enemy_dist <= 3  # Só atira se muito perto
+        
+        return True  # Atira normalmente
 
 
     # <summary>
@@ -233,12 +381,33 @@ class GameAI():
         
         # 1. Immediate Reactive Actions
         
-        # PRIORITY -1: CRITICAL SURVIVAL (Energy Low)
-        # If energy is not full (or low threshold), get powerup immediately
-        if self.energy < 100:
+        # PRIORITY -2: CRITICAL SURVIVAL (Energy Critical < 20)
+        # ABSOLUTE PRIORITY: Must find powerup immediately, ignore everything
+        if self.energy < self.CRITICAL_ENERGY:
             # Check current cell
             if "redLight" in self.current_observations:
-                 print("PRIORITY: Low Energy & PowerUp found. Refueling.")
+                print(f"CRITICAL: Energy at {self.energy}! Grabbing powerup NOW!")
+                self.last_action = "pegar_powerup"
+                return "pegar_powerup"
+            
+            # Search for known powerups with HIGHEST priority
+            if self.powerup_locations:
+                start = (self.player.x, self.player.y)
+                nearest_pup = min(self.powerup_locations, key=lambda p: abs(p[0]-start[0]) + abs(p[1]-start[1]))
+                print(f"CRITICAL: Energy at {self.energy}! Fleeing to PowerUp at {nearest_pup}")
+                next_step = self.GetNextStepTowards(nearest_pup)
+                if next_step:
+                    self.last_action = next_step
+                    return next_step
+            
+            print(f"CRITICAL: Energy at {self.energy}! No powerups known. Exploring for survival.")
+            # Will continue to exploration below to find powerups
+        
+        # PRIORITY -1: LOW ENERGY (Proactive refueling when < 100)
+        elif self.energy < 100:
+            # Check current cell
+            if "redLight" in self.current_observations:
+                 print(f"PRIORITY: Low Energy ({self.energy}) & PowerUp found. Refueling.")
                  self.last_action = "pegar_powerup"
                  return "pegar_powerup"
                  
@@ -246,7 +415,7 @@ class GameAI():
             if self.powerup_locations:
                  start = (self.player.x, self.player.y)
                  nearest_pup = min(self.powerup_locations, key=lambda p: abs(p[0]-start[0]) + abs(p[1]-start[1]))
-                 print(f"PRIORITY: Low Energy. Moving to known PowerUp at {nearest_pup}")
+                 print(f"PRIORITY: Low Energy ({self.energy}). Moving to known PowerUp at {nearest_pup}")
                  next_step = self.GetNextStepTowards(nearest_pup)
                  if next_step:
                      self.last_action = next_step
@@ -286,6 +455,7 @@ class GameAI():
         for obs in self.current_observations:
             if obs.startswith("enemy#"):
                 enemy_visible = True
+                self.UpdateEnemyTracking(obs)  # Track enemy movement
                 try:
                     # Enemy obs format: enemy#distance
                     # But the string is usually just "enemy#n"? No, usually "enemy#1" etc?
@@ -305,18 +475,44 @@ class GameAI():
                     enemy_dist = 5 # Default max range
             except:
                 enemy_dist = 5
+        
+            # TACTICAL RETREAT: Flee if low energy and enemy visible
+            # OR if DEFENSIVE mode (protecting lead)
+            strategic_mode = self.GetStrategicMode()
+            
+            if self.energy < self.LOW_ENERGY or strategic_mode == "DEFENSIVE":
+                if strategic_mode == "DEFENSIVE":
+                    print(f"STRATEGIC RETREAT: Protecting lead (Rank {self.my_rank}/{self.total_players}). Avoiding combat.")
+                else:
+                    print(f"TACTICAL RETREAT: Energy low ({self.energy}) & enemy detected at {enemy_dist}! Fleeing.")
+                
+                import random
+                if random.choice([True, False]):
+                    return "virar_direita"
+                else:
+                    return "virar_esquerda"
 
             # Check Line of Fire up to enemy distance
             if self.HasLineOfFire(enemy_dist):
-                print(f"HUNTER: Enemy detected at dist {enemy_dist} & Clear Shot! Attacking.")
-                self.last_action = "atacar"
-                return "atacar"
+                # Check if shot is likely to hit based on enemy movement
+                should_shoot = self.PredictEnemyInterception(enemy_dist)
+                
+                if should_shoot:
+                    print(f"HUNTER: Enemy detected at dist {enemy_dist} & Clear Shot! Attacking.")
+                    self.last_action = "atacar"
+                    return "atacar"
+                else:
+                    print(f"HUNTER: Enemy at {enemy_dist} moving laterally. Repositioning for better shot.")
+                    # Move closer instead of shooting
+                    return "andar"
             else:
                 print(f"HUNTER: Enemy detected at {enemy_dist} but LOS Blocked! Initiating Strafe.")
                 self.combat_state = "strafe_turning"
                 self.original_dir = self.dir
-                # Decide turning direction (random or based on safety)
-                # Try Right first
+                
+                # Check if strafe direction is safe before committing
+                # Try both directions and pick safe one
+                # For now, simple: just turn right
                 return "virar_direita"
 
         # Handle Combat States (Strafing sequence)
@@ -348,6 +544,21 @@ class GameAI():
             print("HUNTER: Under attack! Spinning to find target.")
             self.under_attack = False # Reset flag after reacting
             return "virar_direita" # Spin to find
+        
+        # HUNTER: Active hunting when steps detected
+        if self.enemy_nearby and not enemy_visible:
+            strategic_mode = self.GetStrategicMode()
+            
+            # If AGGRESSIVE mode, hunt more aggressively
+            if strategic_mode == "AGGRESSIVE":
+                print(f"HUNTER (AGGRESSIVE): Steps detected! Actively hunting to catch up on score.")
+            else:
+                print("HUNTER: Steps detected! Enemy is close but not in sight. Scanning area.")
+            
+            # Enemy is adjacent but not in front of us
+            # Spin to find them
+            self.enemy_nearby = False  # Reset to avoid infinite spin
+            return "virar_direita"
             
         if self.shot_connected:
              print("HUNTER: Shot connected! Keeping pressure/search.")
@@ -475,30 +686,46 @@ class GameAI():
                         queue.append((nx, ny))
                     elif self.IsSafe(nx, ny):
                         # Found a safe unvisited! This is our target.
-                        # We don't add to queue because we stop here.
+            # We don't add to queue because we stop here.
                         return (nx, ny)
         
         return None
 
     def GetNextStepTowards(self, target):
-        # A* or BFS to find first step
+        # A* pathfinding with Manhattan distance heuristic
         start = (self.player.x, self.player.y)
-        # Reconstruct path
-        queue = deque([(start, [])])
-        visited_path = {start}
         
-        while queue:
-            curr, path = queue.popleft()
+        if start == target:
+            return None
+        
+        # Manhattan distance heuristic
+        def heuristic(pos):
+            return abs(pos[0] - target[0]) + abs(pos[1] - target[1])
+        
+        # Priority queue: (f_score, counter, current_pos, path)
+        # f_score = g_score + h_score
+        # g_score = actual cost from start
+        # h_score = heuristic estimated cost to target
+        counter = 0  # Tie-breaker for equal f_scores
+        pq = [(heuristic(start), counter, start, [])]
+        visited_astar = {start}
+        g_scores = {start: 0}
+        
+        while pq:
+            f_score, _, curr, path = heapq.heappop(pq)
+            
+            # Found target
             if curr == target:
-                if not path: return None 
+                if not path:
+                    return None
+                    
                 first_move = path[0]
                 
-                # Determine action based on first_move coord
+                # Determine action based on first_move coordinate
                 tx, ty = first_move
                 sx, sy = start
                 
-                # Turn logic
-                # We need to face the direction first
+                # Determine target direction
                 curr_dir = self.dir
                 target_dir = ""
                 
@@ -510,7 +737,7 @@ class GameAI():
                 if curr_dir == target_dir:
                     return "andar"
                 
-                # Better turn logic
+                # Turn logic (shortest turn)
                 dirs = ["north", "east", "south", "west"]
                 idx_curr = dirs.index(curr_dir)
                 idx_target = dirs.index(target_dir)
@@ -518,20 +745,29 @@ class GameAI():
                 diff = (idx_target - idx_curr) % 4
                 if diff == 1: return "virar_direita"
                 if diff == 3: return "virar_esquerda"
-                if diff == 2: return "virar_direita" # 180 turn
-                
+                if diff == 2: return "virar_direita"  # 180 turn (arbitrary choice)
             
-            # Neighbors
+            # Expand neighbors
+            curr_g = g_scores[curr]
             for nx, ny in self.GetNeighbors(curr[0], curr[1]):
-                if (nx, ny) not in visited_path:
-                    # Can only traverse visited cells to reach the frontier
-                    # EXCEPT the last step which is the target (Safe Unvisited)
-                    if (nx, ny) in self.visited or (nx, ny) == target:
-                         visited_path.add((nx, ny))
-                         new_path = list(path)
-                         new_path.append((nx, ny))
-                         queue.append(((nx, ny), new_path))
-                         
+                # Can only traverse visited cells OR the target itself
+                if (nx, ny) not in self.visited and (nx, ny) != target:
+                    continue
+                    
+                new_g = curr_g + 1  # Cost to neighbor is always 1
+                
+                # If we found a better path to this neighbor, update it
+                if (nx, ny) not in g_scores or new_g < g_scores[(nx, ny)]:
+                    g_scores[(nx, ny)] = new_g
+                    f_score = new_g + heuristic((nx, ny))
+                    
+                    new_path = list(path)
+                    new_path.append((nx, ny))
+                    
+                    counter += 1
+                    heapq.heappush(pq, (f_score, counter, (nx, ny), new_path))
+                    visited_astar.add((nx, ny))
+        
         return None
 
     def RandomSafeMove(self):

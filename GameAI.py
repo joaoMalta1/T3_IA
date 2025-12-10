@@ -26,9 +26,15 @@ from typing import List, Dict, Set, Tuple, Optional
 from collections import deque
 import heapq
 
-# <summary>
-# Game AI Example
-# </summary>
+# ============== FINITE STATE MACHINE ==============
+class AgentState(Enum):
+    EXPLORING = "exploring"
+    COLLECTING_GOLD = "collecting_gold"
+    REFUELING = "refueling"
+    COMBAT = "combat"
+    RETREATING = "retreating"
+
+
 class GameAI():
 
     # Energy thresholds
@@ -55,19 +61,18 @@ class GameAI():
     energy = 0
 
     # Map State
-    # 0: Unknown, 1: Safe, 2: Wall, 3: Pit, 4: Teleport (Treat as Pit/Hazard)
     map_state: Dict[Tuple[int, int], str] = {}
     visited: Set[Tuple[int, int]] = set()
     safe_cells: Set[Tuple[int, int]] = set()
     hazards: Set[Tuple[int, int]] = set() # Known pits/teleports/walls
     
-    # Inference lists
+
     breeze_sources: Set[Tuple[int, int]] = set()
     flash_sources: Set[Tuple[int, int]] = set()
     
     current_observations: List[str] = []
     
-    # Last action memory for inferring walls
+
     last_action = ""
     last_pos = (0, 0)
     
@@ -91,9 +96,6 @@ class GameAI():
         # Pre-mark 0,0 (or start) as safe once we get first status? 
         # Actually SetStatus calls SetPlayerPosition.
 
-    # <summary>
-    # Refresh player status
-    # </summary>
     def SetStatus(self, x: int, y: int, dir: str, state: str, score: int, energy: int):
         
         self.SetPlayerPosition(x, y)
@@ -102,8 +104,7 @@ class GameAI():
         self.state = state
         self.score = score
         self.energy = energy
-        
-        # Mark current position as visited and safe
+
         self.visited.add((x, y))
         self.safe_cells.add((x, y))
         self.map_state[(x, y)] = "Safe"
@@ -164,9 +165,7 @@ class GameAI():
             return "BALANCED"
 
 
-    # <summary>
-    # Get list of observable adjacent positions
-    # </summary>
+
     def GetCurrentObservableAdjacentPositions(self) -> List[Position]:
         return self.GetObservableAdjacentPositions(self.player)
         
@@ -179,9 +178,7 @@ class GameAI():
         return ret
 
 
-    # <summary>
-    # Get list of all adjacent positions (including diagonal)
-    # </summary>
+
     def GetAllAdjacentPositions(self):
         ret = []
         for dx in [-1, 0, 1]:
@@ -202,23 +199,17 @@ class GameAI():
             ret = Position(self.player.x - steps, self.player.y)
         return ret
 
-    # <summary>
-    # Get next forward position
-    # </summary>
+
     def NextPosition(self) -> Position:
         return self.NextPositionAhead(1)
             
 
-    # <summary>
-    # Player position
-    # </summary>
+
     def GetPlayerPosition(self):
         return Position(self.player.x, self.player.y)
 
 
-    # <summary>
-    # Set player position
-    # </summary>
+
     def SetPlayerPosition(self, x: int, y: int):
         self.player.x = x
         self.player.y = y
@@ -226,24 +217,20 @@ class GameAI():
         self.safe_cells.add((x, y))
     
 
-    # <summary>
-    # Observations received
-    # </summary>
+
     def GetObservations(self, o):
-        # Handle events specifically
         if "damage" in o:
             self.under_attack = True
             print("EVENT: Taken Damage!")
-            return # Don't overwrite visual observations with event data
+            return
             
         if "hit" in o:
             self.shot_connected = True
             print("EVENT: Shot Hit!")
-            return # Don't overwrite visual observations
+            return
 
         self.current_observations = o
-        
-        # Immediate processing
+
         curr_x, curr_y = self.player.x, self.player.y
         self.safe_cells.add((curr_x, curr_y))
         self.map_state[(curr_x, curr_y)] = "Safe"
@@ -268,23 +255,11 @@ class GameAI():
         # If we successfully picked up gold, remove it from memory
         if "blueLight" not in o and (curr_x, curr_y) in self.gold_locations:
              self.gold_locations.discard((curr_x, curr_y))
-             
-        # If we successfully picked up powerup, remove it from memory
+
         if "redLight" not in o and (curr_x, curr_y) in self.powerup_locations:
              self.powerup_locations.discard((curr_x, curr_y))
                 
         if blocked and self.last_action == "andar":
-            # Infer wall
-            # The last intended position was a wall
-            pass # TODO: Infer wall position based on last dir (Need to store last dir too)
-            # Actually, if we just tried to walk and got blocked, the cell in front of us (BEFORE the move?) 
-            # Wait, blocked means we didn't move. So the cell in front of us NOW? 
-            # Or the cell we TRIED to go to from the PREVIOUS position?
-            # Usually blocked update comes after the command.
-            # If I am at (0,0), face North, send "andar".
-            # If wall at (0,-1), I stay at (0,0) and get "blocked".
-            # So the wall is at NextPosition() from where I was?
-            # If I stayed only, then NextPosition() from current is the wall.
             wall_pos = self.NextPosition()
             if wall_pos:
                 self.hazards.add((wall_pos.x, wall_pos.y))
@@ -292,9 +267,7 @@ class GameAI():
                 self.safe_cells.discard((wall_pos.x, wall_pos.y))
 
 
-    # <summary>
-    # No observations received
-    # </summary>
+
     def GetObservationsClean(self):
         self.current_observations = []
         self.enemy_nearby = False  # Reset flag
@@ -372,14 +345,27 @@ class GameAI():
         return True  # Atira normalmente
 
 
-    # <summary>
-    # Get Decision
-    # </summary>
+
     def GetDecision(self) -> str:
+        # ============== ANTI-STUCK: Track position history ==============
+        curr_pos = (self.player.x, self.player.y)
+        self.position_history.append(curr_pos)
+        if len(self.position_history) > 10:
+            self.position_history.pop(0)
         
-        # 1. Immediate Reactive Actions
+        # Check if stuck in straight line (same row OR column for 4+ moves)
+        if len(self.position_history) >= 4 and not self.gold_locations:
+            last_4 = self.position_history[-4:]
+            all_same_x = all(p[0] == last_4[0][0] for p in last_4)
+            all_same_y = all(p[1] == last_4[0][1] for p in last_4)
+            
+            if all_same_x or all_same_y:
+                print("ANTI-STUCK: Detected straight-line pattern! Forcing turn.")
+                self.position_history.clear()
+                return "virar_direita"
         
-        # 1. Immediate Reactive Actions
+        # ============== FSM STATE TRANSITIONS ==============
+        old_state = self.fsm_state
         
         # PRIORITY -2: CRITICAL SURVIVAL (Energy Critical < 20)
         # ABSOLUTE PRIORITY: Must find powerup immediately, ignore everything
@@ -421,32 +407,33 @@ class GameAI():
                      self.last_action = next_step
                      return next_step
 
-        # PRIORITY 0: GOLD (Greedy + Memory)
-        # Check if we are standing on gold
+        # PRIORITY 0: GOLD
         if "blueLight" in self.current_observations:
             print("PRIORITY: Gold found (Current). Collecting.")
             self.last_action = "pegar_ouro"
             return "pegar_ouro"
             
-        # Check if we assume chance of gold (weakLight = maybe item?)
+
         if "weakLight" in self.current_observations:
              print("PRIORITY: Unknown item. Collecting.")
              self.last_action = "pegar_ouro" 
              return "pegar_ouro"
 
-        # Check if we know where gold is (Memory)
+
         if self.gold_locations:
-             # Find nearest gold
              start = (self.player.x, self.player.y)
              nearest = min(self.gold_locations, key=lambda p: abs(p[0]-start[0]) + abs(p[1]-start[1]))
              
-             # If we are there but didn't pick it (already handled above by blueLight check)
-             # So we must be far. Move towards it.
-             print(f"PRIORITY: Moving to known gold at {nearest}")
-             next_step = self.GetNextStepTowards(nearest)
-             if next_step:
-                 self.last_action = next_step
-                 return next_step
+             # If we are AT the gold location but don't see blueLight, it's gone!
+             if nearest == start:
+                 print(f"PRIORITY: Arrived at gold location {nearest} but no gold found. Removing from memory.")
+                 self.gold_locations.discard(nearest)
+             else:
+                 print(f"PRIORITY: Moving to known gold at {nearest}")
+                 next_step = self.GetNextStepTowards(nearest)
+                 if next_step:
+                     self.last_action = next_step
+                     return next_step
                  
         # PRIORITY 1: HUNTER / COMBAT
         enemy_visible = False
@@ -517,30 +504,16 @@ class GameAI():
 
         # Handle Combat States (Strafing sequence)
         if self.combat_state == "strafe_turning":
-            # We just turned. Now Move.
             print("HUNTER: Strafing (Moving).")
             self.combat_state = "strafe_moving"
-            # Check if safe? If not, maybe just turn back? 
-            # We assume we tried to turn to a safe spot.
-            # TODO: Add safety check here.
             return "andar"
             
         if self.combat_state == "strafe_moving":
-            # We moved. Now turn back to original direction (to face enemy)
             print("HUNTER: Strafing (Reacquiring Target).")
-            self.combat_state = None # Reset
-            
-            # Use turn logic to face original_dir
-            # Current dir is original_dir + 90 (if we turned right)
-            # We want to go back to original_dir.
-            # If we turned Right, we are +90. To go back, Turn Left.
-            # But wait, we returned "virar_direita" hardcoded above.
+            self.combat_state = None
             return "virar_esquerda"
             
         if self.under_attack:
-            # We took damage but don't see the enemy?
-            # They might be behind us or to the side.
-            # Strategy: Spin around to find them.
             print("HUNTER: Under attack! Spinning to find target.")
             self.under_attack = False # Reset flag after reacting
             return "virar_direita" # Spin to find
@@ -564,33 +537,23 @@ class GameAI():
              print("HUNTER: Shot connected! Keeping pressure/search.")
              self.shot_connected = False
         
-        # PRIORITY 3: Gold (Secondary/Exploration via SafeFrontier)
-        # Note: We already prioritized Known Gold and Current Gold above.
-        # This section is mostly redundant for "has_gold" but maybe kept for "has_item" or fallback?
-        # Actually removed "has_gold" check here since it's at top.
-        
-        # 3. Pathfinding / Exploration
-
-        # 3. Pathfinding / Exploration
-        # Goal: Find nearest "Safe Frontier"
-        # Frontier = Safe cell that has at least one Unknown neighbor
+        # EXPLORATION
         
         target = self.FindNearestFrontier()
         
         if target:
-            # Plan path to target
+
             next_step = self.GetNextStepTowards(target)
             if next_step:
                 self.last_action = next_step
                 return next_step
         
-        # 3. Fallback: Random Walk (Safe) or Rotate
+        # FALLBACK
         return self.RandomSafeMove()
 
     def HasLineOfFire(self, max_dist=5):
-        # Check path to enemy
         print(f"LOS CHECK: Checking {max_dist} steps ahead from {self.player} facing {self.dir}")
-        for i in range(1, max_dist): # Check cells strictly BETWEEN player and enemy
+        for i in range(1, max_dist):
             pos = self.NextPositionAhead(i)
             if not pos: break
             
@@ -604,31 +567,20 @@ class GameAI():
         return True
 
     def GetNeighbors(self, x, y):
-        return [(x, y-1), (x+1, y), (x, y+1), (x-1, y)] # N, E, S, W
+        return [(x, y-1), (x+1, y), (x, y+1), (x-1, y)]
         
     def IsSafe(self, x, y):
+        if x < 0 or y < 0: return False
+        
         if (x, y) in self.safe_cells: return True
         if (x, y) in self.hazards: return False
         
-        # Check inference
-        # If any safe neighbor has NO breeze and NO flash, then (x,y) is safe
-        # Logic: Breeze(A) <=> At least one neighbor is Pit.
-        # Contrapositive: No Breeze(A) <=> All neighbors are NOT Pit.
+
         
-        # Start optimistic: assume safe unless proven hazardous?
-        # Safe Exploration: Assume unsafe unless proven safe.
-        
-        # Check if known safe:
-        if (x,y) in self.safe_cells: return True
-        
-        # Check if proven safe by neighbors
-        # Find neighbors of (x,y) that are visited.
-        # If any visited neighbor has NO breeze AND NO flash, then (x,y) is OK to visit.
+
         neighbors = self.GetNeighbors(x, y)
         for nx, ny in neighbors:
             if (nx, ny) in self.visited:
-                # If visited neighbor has NO breeze and NO flash, then (x,y) can't be a pit or teleport
-                # (Assuming sensors are perfect and always trigger)
                 if (nx, ny) not in self.breeze_sources and (nx, ny) not in self.flash_sources:
                     self.safe_cells.add((x, y))
                     return True
@@ -636,48 +588,15 @@ class GameAI():
         return False
 
     def FindNearestFrontier(self):
-        # BFS to find nearest reachable safe cell that has unknown neighbors
-        # Actually we look for a cell C in Safe such that Neighbor(C) is Unknown
-        # And we want the path to C (or actually to the unknown neighbor?)
-        # We walk to C, then step into Unknown.
-        
-        # But we need to verify the Unknown is Safe before stepping in?
-        # Yes, using IsSafe logic.
-        
         start = (self.player.x, self.player.y)
         queue = deque([start])
         visited_bfs = {start}
-        
-        # If we are already next to a safe unknown, take it.
-        
-        # Optimization: We want to move to a cell 'target' such that 'target' is SAFE and UNVISITED.
-        # The path must consist of VISITED cells (because we know they are safe and we are there).
-        
-        # Wait, standard Wumpus exploration:
-        # Move to a cell that is Safe but Unvisited.
-        # Path must go through Visited cells (Safe).
-        
+
         while queue:
             curr = queue.popleft()
-            
-            # Check if this cell is a "Frontier" = safe and unvisited?
-            # Or is it a visited cell that is adjacent to a safe unvisited?
-            
-            # Condition to be a target: SAFE and NOT VISITED
             if self.IsSafe(curr[0], curr[1]) and curr not in self.visited:
                 return curr
-            
-            # Expand neighbors
-            # Valid neighbors for pathfinding must be VISITED (already explored safe zone)
-            # OR the *immediate* target (Safe Unvisited).
-            
-            # So, only expand (add to queue) if the neighbor is VISITED.
-            # But we also need to check neighbors of visited to see if they are targets.
-            
-            # Let's adjust BFS:
-            # Graph nodes: All Safe cells (Visited + Known Safe Unvisited).
-            # Edges: Adjacency.
-            # We want nearest Safe Unvisited.
+
             
             for nx, ny in self.GetNeighbors(curr[0], curr[1]):
                 if (nx, ny) not in visited_bfs:
@@ -771,13 +690,37 @@ class GameAI():
         return None
 
     def RandomSafeMove(self):
-        # If stuck, just turn or move randomly to a safe spot if possible
-        actions = ["virar_direita", "virar_esquerda"]
-        
-        # Check if forward is safe
         fwd = self.NextPosition()
-        if fwd and self.IsSafe(fwd.x, fwd.y):
-             actions.append("andar")
         
-        return random.choice(actions)
+
+        if fwd and self.IsSafe(fwd.x, fwd.y) and (fwd.x, fwd.y) not in self.visited:
+            print("FALLBACK: Moving forward to unexplored safe cell.")
+            return "andar"
+        
+
+        if fwd and self.IsSafe(fwd.x, fwd.y):
+            print("FALLBACK: Moving forward.")
+            return "andar"
+        
+
+        for turn_action in ["virar_direita", "virar_esquerda"]:
+
+            dirs = ["north", "east", "south", "west"]
+            idx = dirs.index(self.dir)
+            if turn_action == "virar_direita": idx = (idx + 1) % 4
+            else: idx = (idx - 1) % 4
+            new_dir = dirs[idx]
+
+            if new_dir == "north": nx, ny = self.player.x, self.player.y - 1
+            elif new_dir == "east": nx, ny = self.player.x + 1, self.player.y
+            elif new_dir == "south": nx, ny = self.player.x, self.player.y + 1
+            else: nx, ny = self.player.x - 1, self.player.y
+            
+            if self.IsSafe(nx, ny) and (nx, ny) not in self.visited:
+                print(f"FALLBACK: Turning {turn_action} towards unexplored ({nx},{ny}).")
+                return turn_action
+        
+
+        print("FALLBACK: Turning right to continue search.")
+        return "virar_direita"
 

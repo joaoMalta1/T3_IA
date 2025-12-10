@@ -35,7 +35,7 @@ class Bot():
 
     #Descomente para escolher uma cor
     #botcolor = (255,0,0)  # BOT COLOR
-    name = "Vinicius Machado da Rocha Viana é beta" # BOT NAME
+    name = "LEIAM WORM (WILDBOW) PLS" # BOT NAME
     host = "atari.icad.puc-rio.br" # SERVER
     port = 8888
 

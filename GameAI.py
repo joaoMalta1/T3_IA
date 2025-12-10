@@ -65,6 +65,9 @@ class GameAI():
         self.under_attack = False
         self.shot_connected = False
         self.last_known_enemy_pos = None
+        self.combat_state = None # None, "strafe_turning", "strafe_moving", "reacquiring"
+        self.strafe_dir = None   # "left" or "right" relative to enemy
+        self.original_dir = None # "north", etc.
         # Pre-mark 0,0 (or start) as safe once we get first status? 
         # Actually SetStatus calls SetPlayerPosition.
 
@@ -231,9 +234,40 @@ class GameAI():
                 break
         
         if enemy_visible:
-            print("HUNTER: Enemy detected! Attacking.")
-            self.last_action = "atacar"
-            return "atacar"
+            # Check Line of Fire
+            if self.HasLineOfFire():
+                print("HUNTER: Enemy detected & Clear Shot! Attacking.")
+                self.last_action = "atacar"
+                return "atacar"
+            else:
+                print("HUNTER: Enemy detected but LOS Blocked! Initiating Strafe.")
+                self.combat_state = "strafe_turning"
+                self.original_dir = self.dir
+                # Decide turning direction (random or based on safety)
+                # Try Right first
+                return "virar_direita"
+
+        # Handle Combat States (Strafing sequence)
+        if self.combat_state == "strafe_turning":
+            # We just turned. Now Move.
+            print("HUNTER: Strafing (Moving).")
+            self.combat_state = "strafe_moving"
+            # Check if safe? If not, maybe just turn back? 
+            # We assume we tried to turn to a safe spot.
+            # TODO: Add safety check here.
+            return "andar"
+            
+        if self.combat_state == "strafe_moving":
+            # We moved. Now turn back to original direction (to face enemy)
+            print("HUNTER: Strafing (Reacquiring Target).")
+            self.combat_state = None # Reset
+            
+            # Use turn logic to face original_dir
+            # Current dir is original_dir + 90 (if we turned right)
+            # We want to go back to original_dir.
+            # If we turned Right, we are +90. To go back, Turn Left.
+            # But wait, we returned "virar_direita" hardcoded above.
+            return "virar_esquerda"
             
         if self.under_attack:
             # We took damage but don't see the enemy?
@@ -286,6 +320,24 @@ class GameAI():
         
         # 3. Fallback: Random Walk (Safe) or Rotate
         return self.RandomSafeMove()
+
+    def HasLineOfFire(self):
+        # Check up to 5 steps ahead for walls
+        # If we see a wall, return False
+        # If we don't, return True (optimistic)
+        for i in range(1, 6):
+            pos = self.NextPositionAhead(i)
+            if not pos: break
+            if (pos.x, pos.y) in self.hazards:
+                # If it's a hazard (pit/wall), we can't shoot through it?
+                # Actually pits we can shoot over? 
+                # Map spec: Wall=2. Pit=3.
+                # Usually walls block shots. Pits might not.
+                # Let's assume Wall blocks.
+                if self.map_state.get((pos.x, pos.y)) == "Wall":
+                    print(f"LOS: Blocked by wall at {pos}")
+                    return False
+        return True
 
     def GetNeighbors(self, x, y):
         return [(x, y-1), (x+1, y), (x, y+1), (x-1, y)] # N, E, S, W

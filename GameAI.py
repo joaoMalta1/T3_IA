@@ -65,9 +65,12 @@ class GameAI():
         self.under_attack = False
         self.shot_connected = False
         self.last_known_enemy_pos = None
+        self.last_known_enemy_pos = None
         self.combat_state = None # None, "strafe_turning", "strafe_moving", "reacquiring"
         self.strafe_dir = None   # "left" or "right" relative to enemy
         self.original_dir = None # "north", etc.
+        self.gold_locations = set() # Memory for known gold
+        self.powerup_locations = set() # Memory for known powerups
         # Pre-mark 0,0 (or start) as safe once we get first status? 
         # Actually SetStatus calls SetPlayerPosition.
 
@@ -182,6 +185,18 @@ class GameAI():
                 self.breeze_sources.add((curr_x, curr_y))
             elif s == "flash":
                 self.flash_sources.add((curr_x, curr_y))
+            elif s == "blueLight":
+                self.gold_locations.add((curr_x, curr_y))
+            elif s == "redLight":
+                self.powerup_locations.add((curr_x, curr_y))
+        
+        # If we successfully picked up gold, remove it from memory
+        if "blueLight" not in o and (curr_x, curr_y) in self.gold_locations:
+             self.gold_locations.discard((curr_x, curr_y))
+             
+        # If we successfully picked up powerup, remove it from memory
+        if "redLight" not in o and (curr_x, curr_y) in self.powerup_locations:
+             self.powerup_locations.discard((curr_x, curr_y))
                 
         if blocked and self.last_action == "andar":
             # Infer wall
@@ -216,8 +231,55 @@ class GameAI():
         
         # 1. Immediate Reactive Actions
         
-        # HUNTER LOGIC
-        # Priority 0: Combat
+        # 1. Immediate Reactive Actions
+        
+        # PRIORITY -1: CRITICAL SURVIVAL (Energy Low)
+        # If energy is not full (or low threshold), get powerup immediately
+        if self.energy < 100:
+            # Check current cell
+            if "redLight" in self.current_observations:
+                 print("PRIORITY: Low Energy & PowerUp found. Refueling.")
+                 self.last_action = "pegar_powerup"
+                 return "pegar_powerup"
+                 
+            # Check memory for powerups
+            if self.powerup_locations:
+                 start = (self.player.x, self.player.y)
+                 nearest_pup = min(self.powerup_locations, key=lambda p: abs(p[0]-start[0]) + abs(p[1]-start[1]))
+                 print(f"PRIORITY: Low Energy. Moving to known PowerUp at {nearest_pup}")
+                 next_step = self.GetNextStepTowards(nearest_pup)
+                 if next_step:
+                     self.last_action = next_step
+                     return next_step
+
+        # PRIORITY 0: GOLD (Greedy + Memory)
+        # Check if we are standing on gold
+        if "blueLight" in self.current_observations:
+            print("PRIORITY: Gold found (Current). Collecting.")
+            self.last_action = "pegar_ouro"
+            return "pegar_ouro"
+            
+        # Check if we assume chance of gold (weakLight = maybe item?)
+        if "weakLight" in self.current_observations:
+             print("PRIORITY: Unknown item. Collecting.")
+             self.last_action = "pegar_ouro" 
+             return "pegar_ouro"
+
+        # Check if we know where gold is (Memory)
+        if self.gold_locations:
+             # Find nearest gold
+             start = (self.player.x, self.player.y)
+             nearest = min(self.gold_locations, key=lambda p: abs(p[0]-start[0]) + abs(p[1]-start[1]))
+             
+             # If we are there but didn't pick it (already handled above by blueLight check)
+             # So we must be far. Move towards it.
+             print(f"PRIORITY: Moving to known gold at {nearest}")
+             next_step = self.GetNextStepTowards(nearest)
+             if next_step:
+                 self.last_action = next_step
+                 return next_step
+                 
+        # PRIORITY 1: HUNTER / COMBAT
         enemy_visible = False
         enemy_dist = 999
         
@@ -234,13 +296,23 @@ class GameAI():
                 break
         
         if enemy_visible:
-            # Check Line of Fire
-            if self.HasLineOfFire():
-                print("HUNTER: Enemy detected & Clear Shot! Attacking.")
+            # Parse distance if available (e.g., enemy#2)
+            try:
+                parts = obs.split('#')
+                if len(parts) > 1:
+                    enemy_dist = int(parts[1])
+                else:
+                    enemy_dist = 5 # Default max range
+            except:
+                enemy_dist = 5
+
+            # Check Line of Fire up to enemy distance
+            if self.HasLineOfFire(enemy_dist):
+                print(f"HUNTER: Enemy detected at dist {enemy_dist} & Clear Shot! Attacking.")
                 self.last_action = "atacar"
                 return "atacar"
             else:
-                print("HUNTER: Enemy detected but LOS Blocked! Initiating Strafe.")
+                print(f"HUNTER: Enemy detected at {enemy_dist} but LOS Blocked! Initiating Strafe.")
                 self.combat_state = "strafe_turning"
                 self.original_dir = self.dir
                 # Decide turning direction (random or based on safety)
@@ -280,30 +352,13 @@ class GameAI():
         if self.shot_connected:
              print("HUNTER: Shot connected! Keeping pressure/search.")
              self.shot_connected = False
-             # If we hit, they might still be there, but maybe not visible if they moved or we turned?
-             # If visible, we already attacked above.
-             # If not visible, maybe move forward to chase or turn?
-             # Let's just continue standard logic, maybe we'll see them again.
         
-        # Priority 1: PowerUps (Sustain the hunt)
-        has_powerup = "redLight" in self.current_observations
-        if has_powerup and self.energy < 100:
-             print("HUNTER: PowerUp found. Refueling.")
-             self.last_action = "pegar_powerup"
-             return "pegar_powerup"
-
-        # Priority 2: Gold (Secondary)
-        has_gold = "blueLight" in self.current_observations
-        if has_gold:
-            print("HUNTER: Gold found. Collecting.")
-            self.last_action = "pegar_ouro"
-            return "pegar_ouro"
+        # PRIORITY 3: Gold (Secondary/Exploration via SafeFrontier)
+        # Note: We already prioritized Known Gold and Current Gold above.
+        # This section is mostly redundant for "has_gold" but maybe kept for "has_item" or fallback?
+        # Actually removed "has_gold" check here since it's at top.
         
-        has_item = "weakLight" in self.current_observations
-        if has_item:
-             print("HUNTER: Unknown item. Collecting.")
-             self.last_action = "pegar_ouro" 
-             return "pegar_ouro"
+        # 3. Pathfinding / Exploration
 
         # 3. Pathfinding / Exploration
         # Goal: Find nearest "Safe Frontier"
@@ -321,22 +376,20 @@ class GameAI():
         # 3. Fallback: Random Walk (Safe) or Rotate
         return self.RandomSafeMove()
 
-    def HasLineOfFire(self):
-        # Check up to 5 steps ahead for walls
-        # If we see a wall, return False
-        # If we don't, return True (optimistic)
-        for i in range(1, 6):
+    def HasLineOfFire(self, max_dist=5):
+        # Check path to enemy
+        print(f"LOS CHECK: Checking {max_dist} steps ahead from {self.player} facing {self.dir}")
+        for i in range(1, max_dist): # Check cells strictly BETWEEN player and enemy
             pos = self.NextPositionAhead(i)
             if not pos: break
-            if (pos.x, pos.y) in self.hazards:
-                # If it's a hazard (pit/wall), we can't shoot through it?
-                # Actually pits we can shoot over? 
-                # Map spec: Wall=2. Pit=3.
-                # Usually walls block shots. Pits might not.
-                # Let's assume Wall blocks.
-                if self.map_state.get((pos.x, pos.y)) == "Wall":
-                    print(f"LOS: Blocked by wall at {pos}")
-                    return False
+            
+            cell_status = self.map_state.get((pos.x, pos.y), "Unknown")
+            print(f"LOS CHECK: Step {i} at {pos} is {cell_status}")
+            
+            if cell_status == "Wall":
+                print(f"LOS: Blocked by wall at {pos}")
+                return False
+                
         return True
 
     def GetNeighbors(self, x, y):

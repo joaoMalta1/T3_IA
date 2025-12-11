@@ -452,37 +452,73 @@ class GameAI():
         return None
 
     def RandomSafeMove(self):
+        # Anti vai-e-volta: pegar células recentes do histórico
+        recent_positions = set(self.position_history[-5:]) if len(self.position_history) > 0 else set()
+        
         fwd = self.NextPosition()
         
-
+        # Prioridade 1: Andar pra frente se for seguro E inexplorado E não recente
         if fwd and self.IsSafe(fwd.x, fwd.y) and (fwd.x, fwd.y) not in self.visited:
             print("FALLBACK: Moving forward to unexplored safe cell.")
             return "andar"
         
-
-        if fwd and self.IsSafe(fwd.x, fwd.y):
-            print("FALLBACK: Moving forward.")
-            return "andar"
+        # Prioridade 2: Avaliar todas as direções com pontuação
+        dirs = ["north", "east", "south", "west"]
+        curr_idx = dirs.index(self.dir)
         
-
-        for turn_action in ["virar_direita", "virar_esquerda"]:
-
-            dirs = ["north", "east", "south", "west"]
-            idx = dirs.index(self.dir)
-            if turn_action == "virar_direita": idx = (idx + 1) % 4
-            else: idx = (idx - 1) % 4
-            new_dir = dirs[idx]
-
-            if new_dir == "north": nx, ny = self.player.x, self.player.y - 1
-            elif new_dir == "east": nx, ny = self.player.x + 1, self.player.y
-            elif new_dir == "south": nx, ny = self.player.x, self.player.y + 1
+        best_action = None
+        best_score = -999
+        
+        # Checar frente, direita e esquerda
+        options = [
+            ("andar", 0),           # Frente
+            ("virar_direita", 1),   # Direita
+            ("virar_esquerda", -1)  # Esquerda
+        ]
+        
+        for action, delta in options:
+            if action == "andar":
+                check_dir = self.dir
+            else:
+                new_idx = (curr_idx + delta) % 4
+                check_dir = dirs[new_idx]
+            
+            # Calcular posição resultante
+            if check_dir == "north": nx, ny = self.player.x, self.player.y - 1
+            elif check_dir == "east": nx, ny = self.player.x + 1, self.player.y
+            elif check_dir == "south": nx, ny = self.player.x, self.player.y + 1
             else: nx, ny = self.player.x - 1, self.player.y
             
+            # Pular se for parede/hazard
+            if (nx, ny) in self.hazards or self.map_state.get((nx, ny)) == "Wall":
+                continue
+            
+            # Calcular score
+            score = 0
             if self.IsSafe(nx, ny) and (nx, ny) not in self.visited:
-                print(f"FALLBACK: Turning {turn_action} towards unexplored ({nx},{ny}).")
-                return turn_action
+                score = 10  # Melhor: seguro e inexplorado
+            elif self.IsSafe(nx, ny):
+                score = 5   # Bom: seguro mas visitado
+            elif (nx, ny) not in self.hazards:
+                score = 2   # OK: desconhecido
+            
+            # PENALIDADE ANTI VAI-E-VOLTA: -8 se foi visitado recentemente
+            if (nx, ny) in recent_positions:
+                score -= 8
+                print(f"FALLBACK: Penalizing ({nx},{ny}) - visited recently!")
+            
+            if score > best_score:
+                best_score = score
+                best_action = action
         
-
-        print("FALLBACK: Turning right to continue search.")
+        if best_action:
+            if best_action == "andar":
+                print(f"FALLBACK: Moving forward (score={best_score}).")
+            else:
+                print(f"FALLBACK: {best_action} (score={best_score}).")
+            return best_action
+        
+        # Último recurso: virar 180 graus
+        print("FALLBACK: All directions blocked. Turning around.")
         return "virar_direita"
 
